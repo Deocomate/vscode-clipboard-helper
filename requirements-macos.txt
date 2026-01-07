@@ -1,0 +1,4 @@
+# macOS-specific dependencies
+# Install with: pip install -r requirements-macos.txt
+
+pyobjc-framework-Cocoa>=10.0

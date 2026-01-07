@@ -2,12 +2,16 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
+.Python
 
 # Virtual Environments
 venv/
 .venv/
 env/
 .env
+ENV/
 
 # Distribution / PyInstaller
 build/
@@ -15,6 +19,8 @@ dist/
 *.spec
 *.egg-info/
 *.manifest
+*.exe
+*.app
 
 # Logs
 *.log
@@ -22,7 +28,22 @@ dist/
 # IDEs
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # Windows
 Thumbs.db
 Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Icon source files (only keep final icons)
+*.iconset/
