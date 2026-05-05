@@ -5,7 +5,7 @@
 🔗 **Seamlessly copy files from VS Code to Explorer/Finder**
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-blue)](#installation)
-[![Python](https://img.shields.io/badge/Python-3.10+-green)](#requirements)
+[![Python](https://img.shields.io/badge/Python-3.12+-green)](#requirements)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](#license)
 
 </div>
@@ -108,7 +108,7 @@ vscode-clipboard-helper/
 
 ## 📋 Requirements
 
-- Python 3.10 or higher
+- Python 3.12 or higher
 - Dependencies vary by platform (see requirements files)
 
 ## 🤝 Contributing
