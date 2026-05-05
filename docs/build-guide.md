@@ -4,7 +4,7 @@ This guide explains how to build standalone executables for Windows and macOS.
 
 ## Prerequisites
 
-- Python 3.10+ with pip
+- Python 3.12+ with pip
 - All dependencies installed (see [Installation Guide](installation.md))
 - Icon files in the project root:
   - `icon.png` - Required for both platforms

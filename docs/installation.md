@@ -4,7 +4,7 @@ This guide covers installing VSCode Clipboard Helper on Windows and macOS.
 
 ## Prerequisites
 
-- **Python 3.10+** - [Download from python.org](https://www.python.org/downloads/)
+- **Python 3.12+** - [Download from python.org](https://www.python.org/downloads/)
 - **pip** - Usually included with Python
 
 ## Windows Installation
