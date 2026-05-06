@@ -1,22 +1,23 @@
 # Installation Guide
 
-This guide covers installing VSCode Clipboard Helper on Windows and macOS.
+This guide covers installing VS Code Clipboard Helper on Windows and macOS.
 
 ## Prerequisites
 
-- **Python 3.12+** - [Download from python.org](https://www.python.org/downloads/)
-- **pip** - Usually included with Python
+- **Python 3.12+** — [Download from python.org](https://www.python.org/downloads/)
+- **pip** — Usually included with Python
+- **Git** (optional) — For cloning the repository
 
 ## Windows Installation
 
 ### Step 1: Clone or Download
 
 ```bash
-git clone https://github.com/your-repo/vscode-clipboard-helper.git
+git clone https://github.com/Deocomate/vscode-clipboard-helper.git
 cd vscode-clipboard-helper
 ```
 
-Or download and extract the ZIP file.
+Or download and extract the ZIP from the [Releases](https://github.com/Deocomate/vscode-clipboard-helper/releases) page.
 
 ### Step 2: Create Virtual Environment (Recommended)
 
@@ -31,6 +32,14 @@ venv\Scripts\activate
 pip install -r requirements.txt -r requirements-windows.txt
 ```
 
+This installs:
+| Package | Purpose |
+|---------|---------|
+| pystray >=0.19.4 | System tray icon |
+| Pillow >=10.0.0 | Icon image handling |
+| pyinstaller >=6.0.0 | Building executables |
+| pywin32 >=306 | Windows clipboard API |
+
 ### Step 4: Run
 
 ```bash
@@ -42,7 +51,7 @@ python main.py
 ### Step 1: Clone or Download
 
 ```bash
-git clone https://github.com/your-repo/vscode-clipboard-helper.git
+git clone https://github.com/Deocomate/vscode-clipboard-helper.git
 cd vscode-clipboard-helper
 ```
 
@@ -59,6 +68,16 @@ source venv/bin/activate
 pip install -r requirements.txt -r requirements-macos.txt
 ```
 
+This installs:
+| Package | Purpose |
+|---------|---------|
+| pystray >=0.19.4 | System tray icon |
+| Pillow >=10.0.0 | Icon image handling |
+| pyinstaller >=6.0.0 | Building executables |
+| pyobjc-framework-Cocoa >=10.0 | macOS pasteboard API |
+
+> **Note:** PyObjC compiles native extensions during installation. This may take several minutes on first install.
+
 ### Step 4: Run
 
 ```bash
@@ -69,11 +88,11 @@ python main.py
 
 | Package | Platform | Purpose |
 |---------|----------|---------|
-| pystray | All | System tray icon |
-| Pillow | All | Icon image handling |
-| pyinstaller | All | Building executables |
-| pywin32 | Windows | Windows clipboard API |
-| pyobjc-framework-Cocoa | macOS | macOS pasteboard API |
+| pystray >=0.19.4 | All | System tray icon |
+| Pillow >=10.0.0 | All | Icon image loading/resizing |
+| pyinstaller >=6.0.0 | All | Building standalone executables |
+| pywin32 >=306 | Windows | Win32 clipboard API (`win32clipboard`, `win32con`) |
+| pyobjc-framework-Cocoa >=10.0 | macOS | macOS pasteboard (`NSPasteboard`, `NSFilenamesPboardType`) |
 
 ## Troubleshooting
 
@@ -84,15 +103,32 @@ Try installing the pre-built wheel:
 pip install pywin32 --no-cache-dir
 ```
 
+If still failing, try:
+```bash
+python -m pip install pywin32 --no-cache-dir --force-reinstall
+```
+
 ### macOS: "pyobjc" installation is slow
 
-PyObjC compiles native extensions, which takes time. Be patient during the first install.
+PyObjC compiles native extensions, which takes time. This is normal. Expect 2-5 minutes on first install.
 
 ### macOS: App crashes on startup
 
 Ensure you have Xcode Command Line Tools:
 ```bash
 xcode-select --install
+```
+
+Also verify Python version:
+```bash
+python3 --version  # Must be 3.12+
+```
+
+### Windows: "No module named 'win32clipboard'"
+
+Make sure you installed the Windows-specific requirements:
+```bash
+pip install -r requirements-windows.txt
 ```
 
 ## Auto-Start on Boot
@@ -111,4 +147,4 @@ xcode-select --install
 
 ---
 
-[← Back to README](../README.md) | [Build Guide →](build-guide.md)
+[← Back to README](../README.md) | [Usage Guide →](usage.md)

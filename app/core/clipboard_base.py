@@ -83,6 +83,19 @@ class ClipboardHandlerBase(ABC):
         """
         pass
 
+    @abstractmethod
+    def set_clipboard_text(self, text: str) -> bool:
+        """
+        Write plain text to the clipboard.
+        
+        Args:
+            text: Text to write to clipboard
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        pass
+
     def extract_file_paths_from_clipboard(self) -> Tuple[Optional[List[str]], Optional[str]]:
         """
         Extract file paths from clipboard using various formats.
@@ -112,30 +125,16 @@ class ClipboardHandlerBase(ABC):
                 if file_list:
                     return file_list, format_name
 
-        # Fallback: try plain text that looks like file paths
+        # Fallback: try plain text that contains file URIs
         text_data = self.get_text_data()
         if text_data:
-            # Only process if text contains file:// URI or looks like absolute path
-            if 'file://' in text_data or self._looks_like_path(text_data):
+            # Only process if text contains file:// URI
+            if 'file://' in text_data:
                 file_list = text_to_files(text_data)
                 if file_list:
                     return file_list, 'TEXT'
 
         return None, None
-
-    def _looks_like_path(self, text: str) -> bool:
-        """
-        Check if text looks like an absolute file path.
-        Platform-specific implementation recommended.
-        """
-        from app.utils.platform import is_windows
-        
-        if is_windows():
-            # Windows: check for drive letter like C:\
-            return len(text) > 2 and text[1] == ':'
-        else:
-            # Unix-like: check for leading /
-            return text.startswith('/')
 
     def should_process_content(self, content_key: str) -> bool:
         """

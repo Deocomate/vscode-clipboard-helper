@@ -1,6 +1,6 @@
 # Usage Guide
 
-Learn how to use VSCode Clipboard Helper effectively.
+Learn how to use VS Code Clipboard Helper effectively.
 
 ## Getting Started
 
@@ -17,10 +17,10 @@ python main.py
 
 ### Main Window
 
-When launched, you'll see the main window with:
-- **Status indicator** - Shows whether monitoring is active
-- **Start/Stop button** - Toggle clipboard monitoring
-- **Instructions** - Quick usage reminder
+When launched, you'll see a 320×180 window with:
+- **Status indicator** — Red (Stopped) or Green (Running) with text label
+- **Start/Stop button** — Toggle clipboard monitoring on/off
+- **Instructions** — Platform-specific usage reminder
 
 ## Using the Tool
 
@@ -33,16 +33,18 @@ When launched, you'll see the main window with:
 3. **Paste anywhere:**
    - Windows Explorer
    - macOS Finder
-   - File manager
-   - Upload dialogs
+   - File upload dialogs
    - Email attachments
+   - Any application that accepts file drops
 
 ### What Happens Behind the Scenes
 
 1. VS Code places file paths in the clipboard using `code/file-list` format
-2. The tool detects this format
-3. It converts the data to native file drop format
-4. Now any app can receive the files as if copied from the file manager
+2. The tool polls the clipboard every 500ms on the main thread
+3. When a supported format is detected, file paths are extracted and validated
+4. Paths are written to the clipboard in native file drop format
+5. Content is marked as converted to prevent re-processing
+6. Any application can now paste the files as if copied from the file manager
 
 ## System Tray
 
@@ -50,100 +52,123 @@ The app runs in the system tray for convenience.
 
 ### Minimizing to Tray
 
-- Click the window's close button (X)
-- The app continues running in the background
-- Look for the icon in your system tray
+- Click the window's close button (X) — the app continues running in the background
+- Look for the icon in your system tray (Windows) or menu bar (macOS)
 
 ### Tray Icon Menu
 
 Right-click the tray icon to see:
-- **Show Window** - Bring back the main window
-- **Show in Dock** (macOS only) - Toggle dock icon visibility
-- **Quit** - Exit the application completely
+
+**Windows:**
+| Menu Item | Action |
+|-----------|--------|
+| Hiện giao diện | Show the main window |
+| Thoát | Quit the application |
+
+**macOS:**
+| Menu Item | Action |
+|-----------|--------|
+| Show Window | Show the main window |
+| Quit | Quit the application |
 
 ### macOS Dock Icon
 
-By default, the app runs as a **menu bar-only** application (no dock icon). To show/hide the dock icon:
+By default, the app runs as a **menu bar-only** application (no Dock icon). To toggle Dock visibility:
 
-1. Click the menu bar icon
-2. Select **"Show in Dock"** to toggle
-3. When checked, the app icon appears in the Dock
+1. Check/uncheck the **"Show in Dock"** checkbox in the main window
+2. When checked, the app icon appears in the Dock
+3. When unchecked, the app only appears in the menu bar
 
-> **Note:** Running without a dock icon keeps your Dock clean while the app runs in the background.
+> **Note:** Running without a Dock icon keeps your Dock clean while the app runs in the background.
 
-### Quick Restore
+## Supported Clipboard Formats
 
-- **Windows:** Click or right-click the tray icon
-- **macOS:** Click the menubar icon
+The tool detects multiple clipboard formats in priority order:
 
+| Priority | Format | Source |
+|----------|--------|--------|
+| 1 | `code/file-list` | VS Code (primary) |
+| 2 | `text/uri-list` | Electron apps |
+| 3 | `vscode-editor-drop` | VS Code drag-and-drop |
+| 4 | `atom-uri-list` | Atom editor |
+| 5 | Plain text with `file://` URIs | Various apps |
 
-## Supported Formats
+If the clipboard already contains native file drop format (CF_HDROP on Windows, NSFilenamesPboardType on macOS), the tool skips conversion.
 
-The tool detects multiple clipboard formats:
+## Path Processing
 
-| Format | Source |
-|--------|--------|
-| `code/file-list` | VS Code (primary) |
-| `text/uri-list` | Electron apps |
-| `vscode-editor-drop` | VS Code drag |
-| `atom-uri-list` | Atom editor |
-| Plain text `file://` URIs | Various apps |
+The tool processes clipboard data through several steps:
 
-## Performance Tips
+1. **Format detection** — Try each supported format in priority order
+2. **Path extraction** — Parse text into individual file paths (one per line)
+3. **Path cleaning** — Remove quotes, URL-decode (`%20` → space), strip `file://` prefix
+4. **Path normalization** — Convert separators to platform-native format (`\` on Windows, `/` on macOS)
+5. **Path validation** — Verify each path exists on disk
+6. **Native conversion** — Write validated paths in native clipboard format
 
-### CPU Usage
+## Performance
 
-The tool polls the clipboard every 500ms. This uses minimal CPU but is noticeable on battery. Consider:
-- Only starting the tool when needed
-- Stopping when not actively copying files
+### CPU and Memory
 
-### Memory
+| Metric | Value |
+|--------|-------|
+| Polling interval | 500ms |
+| Typical memory | 20-50 MB |
+| CPU when idle | < 1% |
+| CPU when converting | Brief spike, < 100ms |
 
-Typical memory usage is 20-50 MB. The Pillow library for icons and Tkinter for the UI are the main consumers.
+Main consumers: Pillow (icon handling) and Tkinter (UI).
+
+### Tips
+
+- Only start monitoring when needed — the toggle button is always available
+- Stop monitoring when not actively copying files to save battery
+- The app uses main-thread polling to avoid GIL issues with PyObjC on macOS
 
 ## Troubleshooting
 
 ### Files not pasting
 
 1. Ensure monitoring is **ON** (status should be green)
-2. Copy the files again - the first copy after starting may not be converted
-3. Check if the files actually exist at the copied paths
+2. Copy the files again — the first copy after starting may not be detected
+3. Check that the source files exist at the copied paths
+4. Try copying twice — sometimes a timing issue means the first copy is detected but not converted
 
 ### Tray icon not visible
 
-**Windows:** Check the system tray overflow area (arrow icon)
+**Windows:** Check the system tray overflow area (click the arrow icon in the taskbar)
 
-**macOS:** The icon should appear in the menubar. If not:
+**macOS:** The icon should appear in the menu bar. If not:
 - Ensure the app has accessibility permissions
 - Try restarting the app
 
 ### Application crashes
 
-Check the console output for error messages:
+Run from terminal to see error messages:
 ```bash
-python main.py  # Run from terminal to see errors
+python main.py
 ```
 
 Common causes:
-- Missing dependencies
-- Permission issues (especially on macOS)
-- Corrupted icon files
+- Missing dependencies (run `pip install -r requirements.txt -r requirements-<platform>.txt`)
+- Permission issues (especially on macOS with accessibility)
+- Corrupted or missing icon files
 
-### Multiple copies needed
+### Double-copy needed
 
 Sometimes you need to copy twice:
-1. First copy: Tool detects and converts
-2. Second copy: Already in native format, pastes correctly
+1. **First copy:** Tool detects and converts the format
+2. **Second copy:** Already in native format, pastes correctly
 
-This is a timing issue when the tool starts immediately after copying.
+This is a timing issue that occurs when the tool starts immediately after copying.
 
-## Keyboard Shortcuts Reference
+## Keyboard Shortcuts
 
 | Action | Windows | macOS |
 |--------|---------|-------|
-| Copy files | `Ctrl+C` | `Cmd+C` |
-| Paste files | `Ctrl+V` | `Cmd+V` |
+| Copy files in VS Code | `Ctrl+C` | `Cmd+C` |
+| Paste files anywhere | `Ctrl+V` | `Cmd+V` |
 
 ---
 
-[← Build Guide](build-guide.md) | [Back to README →](../README.md)
+[← Installation Guide](installation.md) | [Build Guide →](build-guide.md)

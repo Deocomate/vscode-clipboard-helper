@@ -119,6 +119,21 @@ class MacOSClipboardHandler(ClipboardHandlerBase):
             logger.error(f"Error writing to clipboard: {e}")
             return False
 
+    def set_clipboard_text(self, text: str) -> bool:
+        """Write plain text to pasteboard."""
+        try:
+            self._pasteboard.clearContents()
+            success = self._pasteboard.setString_forType_(text, NSPasteboardTypeString)
+            if success:
+                logger.info("Successfully wrote text to pasteboard.")
+                return True
+            else:
+                logger.error("Failed to write text to pasteboard")
+                return False
+        except Exception as e:
+            logger.error(f"Error writing text to clipboard: {e}")
+            return False
+
     def get_file_urls_from_pasteboard(self) -> Optional[List[str]]:
         """
         Read file paths from pasteboard if available.

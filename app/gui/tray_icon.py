@@ -9,6 +9,7 @@ import logging
 from typing import Callable, Optional
 
 import pystray
+import queue
 from PIL import Image, ImageDraw
 
 from app.utils.resources import get_resource_path
@@ -30,8 +31,7 @@ class TrayIcon:
         self,
         app_name: str = "VSCodeBridge",
         tooltip: str = "VS Code Clipboard Helper",
-        on_show_window: Optional[Callable] = None,
-        on_quit: Optional[Callable] = None
+        tray_queue: Optional[queue.Queue] = None
     ):
         """
         Initialize the tray icon.
@@ -39,13 +39,11 @@ class TrayIcon:
         Args:
             app_name: Internal name for the icon
             tooltip: Tooltip text shown on hover
-            on_show_window: Callback when "Show Window" is clicked
-            on_quit: Callback when "Quit" is clicked
+            tray_queue: Queue used to communicate with the main thread
         """
         self.app_name = app_name
         self.tooltip = tooltip
-        self.on_show_window = on_show_window
-        self.on_quit = on_quit
+        self.tray_queue = tray_queue
         
         self._icon: Optional[pystray.Icon] = None
         self._thread: Optional[threading.Thread] = None
@@ -97,14 +95,14 @@ class TrayIcon:
 
     def _handle_show_window(self, icon=None, item=None):
         """Handle the show window menu item."""
-        if self.on_show_window:
-            self.on_show_window()
+        if self.tray_queue:
+            self.tray_queue.put("SHOW_WINDOW")
 
     def _handle_quit(self, icon=None, item=None):
         """Handle the quit menu item."""
         self.stop()
-        if self.on_quit:
-            self.on_quit()
+        if self.tray_queue:
+            self.tray_queue.put("QUIT")
 
     def _run_icon(self):
         """Run the tray icon (called in a separate thread on Windows)."""

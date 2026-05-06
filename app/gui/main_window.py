@@ -8,6 +8,7 @@ Uses main-thread polling on macOS to avoid PyObjC/GIL threading issues.
 import os
 import sys
 import logging
+import queue
 import tkinter as tk
 from tkinter import ttk
 
@@ -39,14 +40,13 @@ class VSCodeBridgeApp:
         self.clipboard_handler = None
         self._show_in_dock = False  # macOS dock visibility
         
-        # Flags for cross-thread communication (pystray -> tkinter)
-        self._pending_show_window = False
-        self._pending_quit = False
+        # Queue for cross-thread communication (pystray -> tkinter)
+        self.tray_queue = queue.Queue()
         
         # Initialize the main window
         self.root = tk.Tk()
         self.root.title("VS Code Clipboard Helper")
-        self.root.geometry("320x180")
+        self.root.geometry("340x260")
         self.root.resizable(False, False)
         
         # Handle window close -> minimize to tray
@@ -56,19 +56,20 @@ class VSCodeBridgeApp:
         self._setup_ui()
         self._setup_window_icon()
         
-        # Setup tray icon (uses flags instead of direct callbacks to avoid GIL issues)
+        # Setup tray icon (uses queue for thread-safe communication)
         self.tray = TrayIcon(
             app_name="VSCodeClipboardHelper",
             tooltip="VS Code Clipboard Helper",
-            on_show_window=self._request_show_window,
-            on_quit=self._request_quit
+            tray_queue=self.tray_queue
         )
+        
+        # Start polling tray queue for all platforms
+        self._process_tray_queue()
         
         # Platform-specific initialization
         if is_macos():
-            # Defer dock visibility and start flag polling
+            # Defer dock visibility
             self.root.after(100, lambda: self._set_dock_visibility(False))
-            self._start_tray_flag_polling()
         
         # Start tray icon
         self.tray.start()
@@ -97,6 +98,28 @@ class VSCodeBridgeApp:
             command=self.toggle_monitoring
         )
         self.toggle_btn.pack(pady=5, fill=tk.X)
+        
+        # Mode selector
+        self.mode_var = tk.StringVar(value="FILES")
+        
+        mode_frame = ttk.LabelFrame(main_frame, text="Mode" if is_macos() else "Chế độ")
+        mode_frame.pack(fill=tk.X, pady=5)
+        
+        self.mode_files_radio = ttk.Radiobutton(
+            mode_frame,
+            text="Paste as Files" if is_macos() else "Paste dạng Files",
+            value="FILES",
+            variable=self.mode_var
+        )
+        self.mode_files_radio.pack(anchor=tk.W, padx=5, pady=2)
+        
+        self.mode_text_radio = ttk.Radiobutton(
+            mode_frame,
+            text="Merge content to Text" if is_macos() else "Gộp nội dung thành Text",
+            value="MERGE_TEXT",
+            variable=self.mode_var
+        )
+        self.mode_text_radio.pack(anchor=tk.W, padx=5, pady=2)
         
         # Instructions
         if is_macos():
@@ -150,31 +173,25 @@ class VSCodeBridgeApp:
 
     # ===== Cross-thread communication (pystray -> tkinter) =====
     
-    def _request_show_window(self):
-        """Set flag to show window (called from pystray thread)."""
-        self._pending_show_window = True
-    
-    def _request_quit(self):
-        """Set flag to quit (called from pystray thread)."""
-        self._pending_quit = True
-    
     def _start_tray_flag_polling(self):
-        """Start polling for tray icon flags (macOS only)."""
-        self._check_tray_flags()
+        """Start polling for tray icon messages (macOS only)."""
+        self._process_tray_queue()
     
-    def _check_tray_flags(self):
-        """Check and handle pending tray icon requests."""
-        if self._pending_show_window:
-            self._pending_show_window = False
-            self._deiconify_window()
-        
-        if self._pending_quit:
-            self._pending_quit = False
-            self._destroy_app()
-            return  # Don't schedule next check
+    def _process_tray_queue(self):
+        """Check and handle pending messages from the tray icon."""
+        try:
+            while True:
+                msg = self.tray_queue.get_nowait()
+                if msg == "SHOW_WINDOW":
+                    self._deiconify_window()
+                elif msg == "QUIT":
+                    self._destroy_app()
+                    return  # Don't schedule next check
+        except queue.Empty:
+            pass
         
         # Continue polling
-        self.root.after(100, self._check_tray_flags)
+        self.root.after(100, self._process_tray_queue)
 
     def _show_window_from_tray(self):
         """Show the main window from tray icon callback (Windows only)."""
@@ -278,8 +295,15 @@ class VSCodeBridgeApp:
                     if self.clipboard_handler.should_process_content(files_key):
                         logger.info(f"Detected {len(file_list)} files from {source_format}")
                         
-                        # Convert to native file format
-                        self.clipboard_handler.set_clipboard_files(file_list)
+                        mode = self.mode_var.get()
+                        if mode == "MERGE_TEXT":
+                            from app.utils.file_merger import merge_files_to_text
+                            merged_text = merge_files_to_text(file_list)
+                            if merged_text:
+                                self.clipboard_handler.set_clipboard_text(merged_text)
+                        else:
+                            # Convert to native file format
+                            self.clipboard_handler.set_clipboard_files(file_list)
                         
                         # Mark as converted
                         self.clipboard_handler.mark_as_converted(files_key)

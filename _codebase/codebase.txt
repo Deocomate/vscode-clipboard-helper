@@ -1,0 +1,1966 @@
+# codebase | 26 files | 2026-05-06 15:49:28
+
+// app/__init__.py
+"""
+VSCode Clipboard Helper - Cross-Platform Application Package
+This package provides a system tray application that monitors the clipboard
+and converts VS Code's file copy format to native file drop format,
+enabling seamless file paste operations to Explorer (Windows) or Finder (macOS).
+"""
+__version__ = "2.0.0"
+__author__ = "VSCode Clipboard Helper Contributors"
+
+// app/core/__init__.py
+"""
+Clipboard utilities package.
+Provides cross-platform clipboard monitoring and file operations.
+"""
+from app.utils.platform import is_windows, is_macos
+def get_clipboard_handler():
+    """
+    Factory function to get the platform-specific clipboard handler.
+    Returns the appropriate implementation based on the current OS.
+    """
+    if is_windows():
+        from app.core.clipboard_windows import WindowsClipboardHandler
+        return WindowsClipboardHandler()
+    elif is_macos():
+        from app.core.clipboard_macos import MacOSClipboardHandler
+        return MacOSClipboardHandler()
+    else:
+        raise NotImplementedError(f"Clipboard handling not supported on this platform")
+__all__ = ['get_clipboard_handler']
+
+// app/core/clipboard_base.py
+"""
+Abstract base class for clipboard operations.
+Defines the interface that platform-specific implementations must follow.
+"""
+from abc import ABC, abstractmethod
+from typing import List, Optional, Tuple
+import logging
+logger = logging.getLogger(__name__)
+class ClipboardHandlerBase(ABC):
+    """
+    Abstract base class defining the interface for clipboard operations.
+    Each platform (Windows, macOS) must provide its own implementation.
+    """
+    ELECTRON_URI_LIST = "text/uri-list"
+    VSCODE_EDITOR_DROP = "vscode-editor-drop"
+    VSCODE_FILE_LIST = "code/file-list"
+    ATOM_URI_LIST = "atom-uri-list"
+    def __init__(self):
+        self.last_clipboard_content = ""
+    @abstractmethod
+    def open_clipboard(self) -> bool:
+        """
+        Open the clipboard for reading/writing.
+        Returns True if successful, False otherwise.
+        """
+        pass
+    @abstractmethod
+    def close_clipboard(self) -> None:
+        """Close the clipboard."""
+        pass
+    @abstractmethod
+    def has_file_drop(self) -> bool:
+        """
+        Check if the clipboard already contains native file drop format.
+        Windows: CF_HDROP
+        macOS: NSFilenamesPboardType
+        """
+        pass
+    @abstractmethod
+    def get_custom_format_data(self, format_name: str) -> Optional[str]:
+        """
+        Read data from a custom clipboard format.
+        Args:
+            format_name: The name of the custom format (e.g., 'code/file-list')
+        Returns:
+            The format data as string, or None if not available
+        """
+        pass
+    @abstractmethod
+    def get_text_data(self) -> Optional[str]:
+        """
+        Get plain text data from the clipboard.
+        Returns:
+            Text content or None if not available
+        """
+        pass
+    @abstractmethod
+    def set_clipboard_files(self, file_list: List[str]) -> bool:
+        """
+        Write file paths to clipboard in native file drop format.
+        Args:
+            file_list: List of absolute file paths
+        Returns:
+            True if successful, False otherwise
+        """
+        pass
+    def extract_file_paths_from_clipboard(self) -> Tuple[Optional[List[str]], Optional[str]]:
+        """
+        Extract file paths from clipboard using various formats.
+        This is the main method called by the monitor loop.
+        Returns:
+            Tuple of (file_list, source_format) or (None, None) if no files found
+        """
+        from app.utils.path_utils import text_to_files
+        if self.has_file_drop():
+            return None, None
+        formats_to_try = [
+            self.VSCODE_FILE_LIST,
+            self.ELECTRON_URI_LIST,
+            self.VSCODE_EDITOR_DROP,
+            self.ATOM_URI_LIST,
+        ]
+        for format_name in formats_to_try:
+            data = self.get_custom_format_data(format_name)
+            if data:
+                file_list = text_to_files(data)
+                if file_list:
+                    return file_list, format_name
+        text_data = self.get_text_data()
+        if text_data:
+            if 'file://' in text_data or self._looks_like_path(text_data):
+                file_list = text_to_files(text_data)
+                if file_list:
+                    return file_list, 'TEXT'
+        return None, None
+    def _looks_like_path(self, text: str) -> bool:
+        """
+        Check if text looks like an absolute file path.
+        Platform-specific implementation recommended.
+        """
+        from app.utils.platform import is_windows
+        if is_windows():
+            return len(text) > 2 and text[1] == ':'
+        else:
+            return text.startswith('/')
+    def should_process_content(self, content_key: str) -> bool:
+        """
+        Check if the content should be processed (hasn't been processed before).
+        Args:
+            content_key: A unique key representing the current clipboard content
+        Returns:
+            True if this is new content that should be processed
+        """
+        if content_key != self.last_clipboard_content:
+            self.last_clipboard_content = content_key
+            return True
+        return False
+    def mark_as_converted(self, content_key: str) -> None:
+        """Mark content as converted to avoid re-processing."""
+        self.last_clipboard_content = content_key + "_converted"
+
+// app/core/clipboard_macos.py
+"""
+macOS-specific clipboard handler implementation.
+Uses PyObjC (Cocoa framework) for clipboard operations.
+"""
+from typing import List, Optional
+import logging
+import subprocess
+from AppKit import NSPasteboard, NSFilenamesPboardType, NSPasteboardTypeString
+from Foundation import NSURL
+from app.core.clipboard_base import ClipboardHandlerBase
+logger = logging.getLogger(__name__)
+DEBUG = False
+class MacOSClipboardHandler(ClipboardHandlerBase):
+    """macOS implementation of clipboard handler using PyObjC."""
+    FILE_URL_TYPE = "public.file-url"
+    FILE_NAMES_TYPE = NSFilenamesPboardType
+    def __init__(self):
+        super().__init__()
+        self._pasteboard = NSPasteboard.generalPasteboard()
+    def open_clipboard(self) -> bool:
+        """
+        Open the clipboard for reading.
+        On macOS, the pasteboard is always accessible, no explicit open needed.
+        """
+        return True
+    def close_clipboard(self) -> None:
+        """
+        Close the clipboard.
+        On macOS, no explicit close is needed.
+        """
+        pass
+    def has_file_drop(self) -> bool:
+        """Check if pasteboard has file names (native file format)."""
+        try:
+            types = self._pasteboard.types()
+            if types is None:
+                return False
+            return (NSFilenamesPboardType in types or 
+                    self.FILE_URL_TYPE in types)
+        except Exception as e:
+            if DEBUG:
+                logger.debug(f"Error checking file drop: {e}")
+            return False
+    def get_custom_format_data(self, format_name: str) -> Optional[str]:
+        """Read data from a custom pasteboard type."""
+        try:
+            types = self._pasteboard.types()
+            if types and format_name in types:
+                data = self._pasteboard.dataForType_(format_name)
+                if data:
+                    try:
+                        return data.bytes().tobytes().decode('utf-8')
+                    except (UnicodeDecodeError, AttributeError):
+                        pass
+        except Exception as e:
+            if DEBUG:
+                logger.debug(f"Error reading {format_name}: {e}")
+        return None
+    def get_text_data(self) -> Optional[str]:
+        """Get plain text from pasteboard."""
+        try:
+            text = self._pasteboard.stringForType_(NSPasteboardTypeString)
+            return text if text else None
+        except Exception as e:
+            if DEBUG:
+                logger.debug(f"Error reading text data: {e}")
+            return None
+    def set_clipboard_files(self, file_list: List[str]) -> bool:
+        """
+        Write file paths to pasteboard using NSFilenamesPboardType.
+        This allows pasting files into Finder and other macOS apps.
+        """
+        try:
+            self._pasteboard.clearContents()
+            file_urls = []
+            for path in file_list:
+                url = NSURL.fileURLWithPath_(path)
+                if url:
+                    file_urls.append(url)
+            if not file_urls:
+                logger.warning("No valid file URLs created")
+                return False
+            success = self._pasteboard.writeObjects_(file_urls)
+            if success:
+                logger.info(f"Converted {len(file_list)} paths to file objects in clipboard.")
+                return True
+            else:
+                logger.error("Failed to write files to pasteboard")
+                return False
+        except Exception as e:
+            logger.error(f"Error writing to clipboard: {e}")
+            return False
+    def get_file_urls_from_pasteboard(self) -> Optional[List[str]]:
+        """
+        Read file paths from pasteboard if available.
+        Useful for debugging pasteboard contents.
+        """
+        try:
+            types = self._pasteboard.types()
+            if types and NSFilenamesPboardType in types:
+                files = self._pasteboard.propertyListForType_(NSFilenamesPboardType)
+                if files:
+                    return list(files)
+            if types and self.FILE_URL_TYPE in types:
+                data = self._pasteboard.dataForType_(self.FILE_URL_TYPE)
+                if data:
+                    url_str = data.bytes().tobytes().decode('utf-8')
+                    from app.utils.path_utils import clean_path
+                    return [clean_path(url_str)]
+        except Exception as e:
+            if DEBUG:
+                logger.debug(f"Error reading file URLs: {e}")
+        return None
+
+// app/core/clipboard_windows.py
+"""
+Windows-specific clipboard handler implementation.
+Uses pywin32 and ctypes for clipboard operations.
+"""
+import ctypes
+from ctypes import wintypes
+from typing import List, Optional
+import logging
+import win32clipboard
+import win32con
+from app.core.clipboard_base import ClipboardHandlerBase
+logger = logging.getLogger(__name__)
+DEBUG = False
+class DROPFILES(ctypes.Structure):
+    """Windows DROPFILES structure for CF_HDROP clipboard format."""
+    _fields_ = [
+        ("pFiles", wintypes.DWORD),
+        ("pt", wintypes.POINT),
+        ("fNC", wintypes.BOOL),
+        ("fWide", wintypes.BOOL),
+    ]
+class WindowsClipboardHandler(ClipboardHandlerBase):
+    """Windows implementation of clipboard handler using pywin32."""
+    def __init__(self):
+        super().__init__()
+        self._clipboard_open = False
+    def open_clipboard(self) -> bool:
+        """Open the Windows clipboard."""
+        try:
+            win32clipboard.OpenClipboard()
+            self._clipboard_open = True
+            return True
+        except Exception as e:
+            if DEBUG:
+                logger.debug(f"Failed to open clipboard: {e}")
+            return False
+    def close_clipboard(self) -> None:
+        """Close the Windows clipboard."""
+        if self._clipboard_open:
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+            self._clipboard_open = False
+    def has_file_drop(self) -> bool:
+        """Check if clipboard has CF_HDROP format (Windows file drop)."""
+        try:
+            return win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP)
+        except Exception:
+            return False
+    def _get_registered_format_id(self, format_name: str) -> int:
+        """Register or get ID of a custom clipboard format."""
+        return ctypes.windll.user32.RegisterClipboardFormatW(format_name)
+    def get_custom_format_data(self, format_name: str) -> Optional[str]:
+        """Read data from a custom Windows clipboard format."""
+        try:
+            format_id = self._get_registered_format_id(format_name)
+            if win32clipboard.IsClipboardFormatAvailable(format_id):
+                data = win32clipboard.GetClipboardData(format_id)
+                if isinstance(data, bytes):
+                    for encoding in ['utf-8', 'utf-16', 'latin-1']:
+                        try:
+                            return data.decode(encoding)
+                        except (UnicodeDecodeError, LookupError):
+                            continue
+                return data
+        except Exception as e:
+            if DEBUG:
+                logger.debug(f"Error reading {format_name}: {e}")
+        return None
+    def get_text_data(self) -> Optional[str]:
+        """Get Unicode text from clipboard."""
+        try:
+            if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                return win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        except Exception as e:
+            if DEBUG:
+                logger.debug(f"Error reading text data: {e}")
+        return None
+    def set_clipboard_files(self, file_list: List[str]) -> bool:
+        """
+        Write file paths to clipboard using CF_HDROP format.
+        This allows pasting files into Windows Explorer and other apps.
+        """
+        try:
+            offset = ctypes.sizeof(DROPFILES)
+            length = sum(len(f) + 1 for f in file_list) + 1
+            size = offset + length * ctypes.sizeof(wintypes.WCHAR)
+            buf = (ctypes.c_char * size)()
+            df = DROPFILES.from_buffer(buf)
+            df.pFiles = offset
+            df.fWide = True  # Unicode
+            current_offset = offset
+            for f in file_list:
+                array_t = ctypes.c_wchar * (len(f) + 1)
+                path_buf = array_t.from_buffer(buf, current_offset)
+                path_buf.value = f
+                current_offset += ctypes.sizeof(path_buf)
+            buf[current_offset] = b'\0'
+            buf[current_offset + 1] = b'\0'
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_HDROP, buf)
+            win32clipboard.CloseClipboard()
+            logger.info(f"Converted {len(file_list)} paths to file objects in clipboard.")
+            return True
+        except Exception as e:
+            logger.error(f"Error writing to clipboard: {e}")
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+            return False
+
+// app/gui/__init__.py
+"""
+GUI components for the VSCode Clipboard Helper application.
+"""
+from app.gui.main_window import VSCodeBridgeApp
+__all__ = ['VSCodeBridgeApp']
+
+// app/gui/main_window.py
+"""
+Main application window.
+Provides the Tkinter-based GUI for the VSCode Clipboard Helper.
+Uses main-thread polling on macOS to avoid PyObjC/GIL threading issues.
+"""
+import os
+import sys
+import logging
+import tkinter as tk
+from tkinter import ttk
+from app.core import get_clipboard_handler
+from app.gui.tray_icon import TrayIcon
+from app.utils.resources import get_resource_path
+from app.utils.platform import is_windows, is_macos
+logger = logging.getLogger(__name__)
+POLL_INTERVAL_MS = 500
+class VSCodeBridgeApp:
+    """
+    Main application class for the VS Code Clipboard Helper.
+    Provides a simple GUI with:
+    - Status indicator
+    - Start/Stop toggle button
+    - System tray icon for background operation
+    - Dock icon visibility toggle (macOS only)
+    """
+    def __init__(self):
+        self.is_running = False
+        self._poll_job = None
+        self.clipboard_handler = None
+        self._show_in_dock = False  # macOS dock visibility
+        self._pending_show_window = False
+        self._pending_quit = False
+        self.root = tk.Tk()
+        self.root.title("VS Code Clipboard Helper")
+        self.root.geometry("320x180")
+        self.root.resizable(False, False)
+        self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
+        self._setup_ui()
+        self._setup_window_icon()
+        self.tray = TrayIcon(
+            app_name="VSCodeClipboardHelper",
+            tooltip="VS Code Clipboard Helper",
+            on_show_window=self._request_show_window,
+            on_quit=self._request_quit
+        )
+        if is_macos():
+            self.root.after(100, lambda: self._set_dock_visibility(False))
+            self._start_tray_flag_polling()
+        self.tray.start()
+    def _setup_ui(self):
+        """Setup the main UI components."""
+        main_frame = ttk.Frame(self.root, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        status_text = "Status: Stopped" if not is_windows() else "Trạng thái: Đang dừng"
+        self.status_label = ttk.Label(
+            main_frame,
+            text=status_text,
+            foreground="red",
+            font=("Helvetica", 10, "bold")
+        )
+        self.status_label.pack(pady=10)
+        button_text = "Start Monitoring" if not is_windows() else "Bật Tool"
+        self.toggle_btn = ttk.Button(
+            main_frame,
+            text=button_text,
+            command=self.toggle_monitoring
+        )
+        self.toggle_btn.pack(pady=5, fill=tk.X)
+        if is_macos():
+            instruction = "Copy files in VS Code (Cmd+C) → Paste into Finder or other apps."
+        else:
+            instruction = "Chọn file trong VS Code → Ctrl+C → Paste vào nơi cần."
+        note = ttk.Label(
+            main_frame,
+            text=instruction,
+            font=("Helvetica", 9),
+            wraplength=280,
+            justify="center"
+        )
+        note.pack(pady=10)
+        if is_macos():
+            self._dock_var = tk.BooleanVar(value=False)
+            self.dock_checkbox = ttk.Checkbutton(
+                main_frame,
+                text="Show in Dock",
+                variable=self._dock_var,
+                command=self._on_dock_checkbox_changed
+            )
+            self.dock_checkbox.pack(pady=5)
+    def _setup_window_icon(self):
+        """Set the window icon if available."""
+        if is_windows():
+            icon_path = get_resource_path("icon.ico")
+            if os.path.exists(icon_path):
+                try:
+                    self.root.iconbitmap(icon_path)
+                except Exception:
+                    pass
+        else:
+            icon_path = get_resource_path("icon.png")
+            if os.path.exists(icon_path):
+                try:
+                    from PIL import Image, ImageTk
+                    img = Image.open(icon_path)
+                    img = img.resize((64, 64), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    self.root.iconphoto(True, photo)
+                    self._icon_photo = photo
+                except Exception:
+                    pass
+    def _request_show_window(self):
+        """Set flag to show window (called from pystray thread)."""
+        self._pending_show_window = True
+    def _request_quit(self):
+        """Set flag to quit (called from pystray thread)."""
+        self._pending_quit = True
+    def _start_tray_flag_polling(self):
+        """Start polling for tray icon flags (macOS only)."""
+        self._check_tray_flags()
+    def _check_tray_flags(self):
+        """Check and handle pending tray icon requests."""
+        if self._pending_show_window:
+            self._pending_show_window = False
+            self._deiconify_window()
+        if self._pending_quit:
+            self._pending_quit = False
+            self._destroy_app()
+            return  # Don't schedule next check
+        self.root.after(100, self._check_tray_flags)
+    def _show_window_from_tray(self):
+        """Show the main window from tray icon callback (Windows only)."""
+        self.root.after(0, self._deiconify_window)
+    def _deiconify_window(self):
+        """Restore and focus the main window."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+    def _quit_from_tray(self):
+        """Quit the application from tray icon (Windows only)."""
+        self.root.after(0, self._destroy_app)
+    def _destroy_app(self):
+        """Clean up and exit the application."""
+        self.is_running = False
+        if self._poll_job:
+            self.root.after_cancel(self._poll_job)
+            self._poll_job = None
+        self.tray.stop()
+        self.root.destroy()
+        sys.exit(0)
+    def hide_window(self):
+        """Hide the main window (minimize to tray)."""
+        self.root.withdraw()
+    def toggle_monitoring(self):
+        """Toggle the clipboard monitoring on/off."""
+        if not self.is_running:
+            self._start_monitoring()
+        else:
+            self._stop_monitoring()
+    def _start_monitoring(self):
+        """Start clipboard monitoring using main-thread polling."""
+        self.is_running = True
+        if is_windows():
+            self.status_label.config(text="Trạng thái: Đang chạy ngầm", foreground="green")
+            self.toggle_btn.config(text="Dừng Tool")
+        else:
+            self.status_label.config(text="Status: Running", foreground="green")
+            self.toggle_btn.config(text="Stop Monitoring")
+        self.clipboard_handler = get_clipboard_handler()
+        logger.info("Started clipboard monitoring...")
+        self._schedule_clipboard_poll()
+    def _stop_monitoring(self):
+        """Stop clipboard monitoring."""
+        self.is_running = False
+        if self._poll_job:
+            self.root.after_cancel(self._poll_job)
+            self._poll_job = None
+        if is_windows():
+            self.status_label.config(text="Trạng thái: Đang dừng", foreground="red")
+            self.toggle_btn.config(text="Bật Tool")
+        else:
+            self.status_label.config(text="Status: Stopped", foreground="red")
+            self.toggle_btn.config(text="Start Monitoring")
+    def _schedule_clipboard_poll(self):
+        """Schedule the next clipboard poll on the main thread."""
+        if self.is_running:
+            self._poll_job = self.root.after(POLL_INTERVAL_MS, self._poll_clipboard)
+    def _poll_clipboard(self):
+        """
+        Poll clipboard once (runs on main thread).
+        This avoids PyObjC GIL conflicts on macOS.
+        """
+        if not self.is_running:
+            return
+        try:
+            if self.clipboard_handler.open_clipboard():
+                file_list, source_format = self.clipboard_handler.extract_file_paths_from_clipboard()
+                self.clipboard_handler.close_clipboard()
+                if file_list:
+                    files_key = "|".join(sorted(file_list))
+                    if self.clipboard_handler.should_process_content(files_key):
+                        logger.info(f"Detected {len(file_list)} files from {source_format}")
+                        self.clipboard_handler.set_clipboard_files(file_list)
+                        self.clipboard_handler.mark_as_converted(files_key)
+        except Exception as e:
+            logger.debug(f"Error in clipboard poll: {e}")
+            try:
+                self.clipboard_handler.close_clipboard()
+            except Exception:
+                pass
+        self._schedule_clipboard_poll()
+    def _on_dock_checkbox_changed(self):
+        """Handle dock visibility checkbox change (runs on main thread)."""
+        if is_macos():
+            show = self._dock_var.get()
+            self._show_in_dock = show
+            self._set_dock_visibility(show)
+    def _set_dock_visibility(self, show: bool):
+        """Set dock icon visibility on macOS."""
+        if not is_macos():
+            return
+        try:
+            from AppKit import NSApp, NSApplicationActivationPolicyRegular, NSApplicationActivationPolicyAccessory
+            if show:
+                NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+                logger.info("Showing app in Dock")
+            else:
+                NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+                logger.info("Hiding app from Dock")
+        except Exception as e:
+            logger.error(f"Error setting dock visibility: {e}")
+    def run(self):
+        """Start the application main loop."""
+        if is_macos():
+            if self.tray._icon:
+                self.tray._icon.run_detached()
+            self.root.mainloop()
+        else:
+            self.root.mainloop()
+
+// app/gui/tray_icon.py
+"""
+System tray icon management.
+Provides cross-platform tray icon functionality using pystray.
+"""
+import os
+import threading
+import logging
+from typing import Callable, Optional
+import pystray
+from PIL import Image, ImageDraw
+from app.utils.resources import get_resource_path
+from app.utils.platform import is_macos, is_windows
+logger = logging.getLogger(__name__)
+class TrayIcon:
+    """
+    Manages the system tray icon for the application.
+    Works on both Windows and macOS using pystray.
+    Note: On macOS, pystray.Icon.run() must be called on the main thread.
+    On Windows, it can run in a background thread.
+    """
+    def __init__(
+        self,
+        app_name: str = "VSCodeBridge",
+        tooltip: str = "VS Code Clipboard Helper",
+        on_show_window: Optional[Callable] = None,
+        on_quit: Optional[Callable] = None
+    ):
+        """
+        Initialize the tray icon.
+        Args:
+            app_name: Internal name for the icon
+            tooltip: Tooltip text shown on hover
+            on_show_window: Callback when "Show Window" is clicked
+            on_quit: Callback when "Quit" is clicked
+        """
+        self.app_name = app_name
+        self.tooltip = tooltip
+        self.on_show_window = on_show_window
+        self.on_quit = on_quit
+        self._icon: Optional[pystray.Icon] = None
+        self._thread: Optional[threading.Thread] = None
+    def create_icon_image(self) -> Image.Image:
+        """
+        Create or load the tray icon image.
+        Returns:
+            PIL Image for the tray icon
+        """
+        icon_path = get_resource_path("icon.png")
+        if os.path.exists(icon_path):
+            try:
+                img = Image.open(icon_path)
+                if is_macos():
+                    img = img.resize((22, 22), Image.Resampling.LANCZOS)
+                else:
+                    img = img.resize((32, 32), Image.Resampling.LANCZOS)
+                return img
+            except Exception as e:
+                logger.error(f"Cannot load icon.png: {e}")
+        size = 22 if is_macos() else 32
+        image = Image.new('RGB', (size, size), 'blue')
+        draw = ImageDraw.Draw(image)
+        margin = size // 4
+        draw.rectangle((margin, margin, size - margin, size - margin), fill='white')
+        return image
+    def _create_menu(self) -> pystray.Menu:
+        """Create the tray icon context menu."""
+        if is_macos():
+            return pystray.Menu(
+                pystray.MenuItem('Show Window', self._handle_show_window),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem('Quit', self._handle_quit)
+            )
+        else:
+            return pystray.Menu(
+                pystray.MenuItem('Hiện giao diện', self._handle_show_window),
+                pystray.MenuItem('Thoát', self._handle_quit)
+            )
+    def _handle_show_window(self, icon=None, item=None):
+        """Handle the show window menu item."""
+        if self.on_show_window:
+            self.on_show_window()
+    def _handle_quit(self, icon=None, item=None):
+        """Handle the quit menu item."""
+        self.stop()
+        if self.on_quit:
+            self.on_quit()
+    def _run_icon(self):
+        """Run the tray icon (called in a separate thread on Windows)."""
+        self._icon = pystray.Icon(
+            self.app_name,
+            self.create_icon_image(),
+            self.tooltip,
+            self._create_menu()
+        )
+        self._icon.run()
+    def start(self):
+        """
+        Start the tray icon.
+        On Windows: runs in a background thread
+        On macOS: must be called from main thread, blocks until stopped
+        """
+        if is_windows():
+            self._thread = threading.Thread(target=self._run_icon, daemon=True)
+            self._thread.start()
+        else:
+            self._icon = pystray.Icon(
+                self.app_name,
+                self.create_icon_image(),
+                self.tooltip,
+                self._create_menu()
+            )
+    def run_detached(self, setup_callback: Optional[Callable] = None):
+        """
+        Run the tray icon with a setup callback (for macOS).
+        This runs the icon's event loop and calls the callback in a background thread.
+        Args:
+            setup_callback: Function to call after icon is set up (runs in thread)
+        """
+        if self._icon:
+            self._icon.run_detached()
+            if setup_callback:
+                setup_callback()
+    def run(self):
+        """Run the tray icon's main loop (blocking)."""
+        if self._icon:
+            self._icon.run()
+    def stop(self):
+        """Stop and remove the tray icon."""
+        if self._icon:
+            try:
+                self._icon.stop()
+            except Exception:
+                pass
+            self._icon = None
+    def update_icon(self, image: Image.Image):
+        """
+        Update the tray icon image.
+        Args:
+            image: New PIL Image for the icon
+        """
+        if self._icon:
+            self._icon.icon = image
+    def update_tooltip(self, tooltip: str):
+        """
+        Update the tray icon tooltip.
+        Args:
+            tooltip: New tooltip text
+        """
+        if self._icon:
+            self._icon.title = tooltip
+
+// app/utils/__init__.py
+"""
+Utility modules for the VSCode Clipboard Helper application.
+"""
+from app.utils.platform import is_windows, is_macos, get_platform_name
+from app.utils.resources import get_resource_path
+from app.utils.path_utils import clean_path, text_to_files
+__all__ = [
+    'is_windows',
+    'is_macos', 
+    'get_platform_name',
+    'get_resource_path',
+    'clean_path',
+    'text_to_files',
+]
+
+// app/utils/path_utils.py
+"""
+Path manipulation utilities.
+Handles cleaning and parsing file paths from various sources.
+"""
+import os
+import urllib.parse
+from typing import List, Optional
+def clean_path(raw_path: str) -> str:
+    """
+    Clean a path from VS Code or other sources.
+    Handles:
+    - Removing quotes
+    - URL decoding (e.g., %20 -> space)
+    - Removing file:// prefix
+    - Normalizing path separators
+    Args:
+        raw_path: Raw path string that may contain URI encoding
+    Returns:
+        Cleaned, normalized path
+    """
+    raw_path = raw_path.strip().strip('"').strip("'")
+    decoded_path = urllib.parse.unquote(raw_path)
+    if decoded_path.startswith("file:///"):
+        from app.utils.platform import is_windows
+        if is_windows():
+            decoded_path = decoded_path[8:]  # Remove "file:///"
+        else:
+            decoded_path = decoded_path[7:]  # Remove "file://" keep leading /
+    elif decoded_path.startswith("file://"):
+        decoded_path = decoded_path[7:]
+    decoded_path = os.path.normpath(decoded_path)
+    return decoded_path
+def text_to_files(text: str) -> Optional[List[str]]:
+    """
+    Parse text content and extract valid file paths.
+    VS Code may copy multiple files, separated by newlines.
+    Each line is cleaned and validated.
+    Args:
+        text: Text that may contain file paths (one per line)
+    Returns:
+        List of valid, existing file paths, or None if none found
+    """
+    if not text:
+        return None
+    lines = text.splitlines()
+    valid_files = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        cleaned = clean_path(line)
+        if os.path.exists(cleaned):
+            valid_files.append(cleaned)
+    return valid_files if valid_files else None
+def is_absolute_path(path: str) -> bool:
+    """
+    Check if a path is absolute.
+    Args:
+        path: Path string to check
+    Returns:
+        True if the path is absolute
+    """
+    return os.path.isabs(path)
+def normalize_path_separators(path: str) -> str:
+    """
+    Normalize path separators to the current platform's style.
+    Args:
+        path: Path with potentially mixed separators
+    Returns:
+        Path with consistent separators
+    """
+    return os.path.normpath(path)
+
+// app/utils/platform.py
+"""
+Platform detection utilities.
+Provides consistent platform identification across the application.
+"""
+import sys
+import platform
+def is_windows() -> bool:
+    """Check if the current platform is Windows."""
+    return sys.platform == 'win32' or sys.platform == 'cygwin'
+def is_macos() -> bool:
+    """Check if the current platform is macOS."""
+    return sys.platform == 'darwin'
+def is_linux() -> bool:
+    """Check if the current platform is Linux."""
+    return sys.platform.startswith('linux')
+def get_platform_name() -> str:
+    """
+    Get a human-readable platform name.
+    Returns:
+        'Windows', 'macOS', 'Linux', or the raw platform string
+    """
+    if is_windows():
+        return 'Windows'
+    elif is_macos():
+        return 'macOS'
+    elif is_linux():
+        return 'Linux'
+    else:
+        return platform.system()
+def get_os_version() -> str:
+    """Get the OS version string."""
+    return platform.version()
+def get_python_version() -> str:
+    """Get the Python version string."""
+    return platform.python_version()
+
+// app/utils/resources.py
+"""
+Resource path utilities.
+Handles finding resources when running from source or as a bundled executable.
+"""
+import os
+import sys
+def get_resource_path(relative_path: str) -> str:
+    """
+    Get absolute path to a resource, works for dev and for PyInstaller.
+    When running as a PyInstaller bundle, resources are extracted to a 
+    temporary folder whose path is stored in sys._MEIPASS.
+    Args:
+        relative_path: Path relative to the application root or bundle
+    Returns:
+        Absolute path to the resource
+    """
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    return os.path.join(base_path, relative_path)
+def get_icon_path(icon_name: str = None) -> str:
+    """
+    Get the path to the application icon.
+    Args:
+        icon_name: Optional specific icon filename. If None, uses platform default.
+    Returns:
+        Path to the icon file
+    """
+    from app.utils.platform import is_windows, is_macos
+    if icon_name:
+        return get_resource_path(icon_name)
+    if is_windows():
+        return get_resource_path("icon.ico")
+    elif is_macos():
+        icns_path = get_resource_path("icon.icns")
+        if os.path.exists(icns_path):
+            return icns_path
+        return get_resource_path("icon.png")
+    else:
+        return get_resource_path("icon.png")
+def resource_exists(relative_path: str) -> bool:
+    """Check if a resource exists."""
+    return os.path.exists(get_resource_path(relative_path))
+
+// docs/build-guide.md
+# Build Guide
+This guide explains how to build standalone executables for Windows and macOS using PyInstaller.
+## Prerequisites
+- **Python 3.12+** with pip
+- All dependencies installed (see [Installation Guide](installation.md))
+- Icon files in the project root:
+  - `icon.png` — Required for both platforms
+  - `icon.ico` — Recommended for Windows
+  - `icon.icns` — Recommended for macOS
+## Quick Build
+Simply run:
+```bash
+python build.py
+```
+The script automatically detects your platform and applies the appropriate PyInstaller settings.
+## Build Output
+| Platform | Output Location | Type |
+|----------|----------------|------|
+| Windows | `dist/VSCodeClipboardHelper.exe` | Single executable (`--onefile`) |
+| macOS | `dist/VSCodeClipboardHelper.app` | Application bundle (`--onedir`) |
+## Windows Build Details
+### What Gets Built
+- Single `.exe` file containing all dependencies
+- No console window (runs silently via `--noconsole`)
+- Icon embedded in the executable
+- Both `icon.png` and `icon.ico` bundled as data files
+### Manual Build Command
+```bash
+pyinstaller main.py ^
+    --name=VSCodeClipboardHelper ^
+    --onefile ^
+    --noconsole ^
+    --icon=icon.ico ^
+    --add-data="icon.png;." ^
+    --add-data="icon.ico;." ^
+    --clean
+```
+### Code Signing (Optional)
+For distribution, consider signing your executable:
+```bash
+signtool sign /a /t http://timestamp.digicert.com dist\VSCodeClipboardHelper.exe
+```
+## macOS Build Details
+### What Gets Built
+- `.app` bundle with proper macOS structure
+- Windowed application (no terminal via `--windowed`)
+- Icon displayed in Finder and Dock
+- Uses `--onedir` for better macOS compatibility
+### Manual Build Command
+```bash
+pyinstaller main.py \
+    --name=VSCodeClipboardHelper \
+    --windowed \
+    --onedir \
+    --icon=icon.icns \
+    --add-data="icon.png:." \
+    --clean
+```
+> **Note:** The build script automatically falls back to `icon.png` if `icon.icns` is not found.
+### Creating an Icon File (.icns)
+If you only have a PNG, convert it using `sips` and `iconutil`:
+```bash
+# Create iconset directory
+mkdir MyIcon.iconset
+# Create all required sizes
+sips -z 16 16     icon.png --out MyIcon.iconset/icon_16x16.png
+sips -z 32 32     icon.png --out MyIcon.iconset/icon_16x16@2x.png
+sips -z 32 32     icon.png --out MyIcon.iconset/icon_32x32.png
+sips -z 64 64     icon.png --out MyIcon.iconset/icon_32x32@2x.png
+sips -z 128 128   icon.png --out MyIcon.iconset/icon_128x128.png
+sips -z 256 256   icon.png --out MyIcon.iconset/icon_128x128@2x.png
+sips -z 256 256   icon.png --out MyIcon.iconset/icon_256x256.png
+sips -z 512 512   icon.png --out MyIcon.iconset/icon_256x256@2x.png
+sips -z 512 512   icon.png --out MyIcon.iconset/icon_512x512.png
+sips -z 1024 1024 icon.png --out MyIcon.iconset/icon_512x512@2x.png
+# Generate .icns file
+iconutil -c icns MyIcon.iconset -o icon.icns
+# Cleanup
+rm -rf MyIcon.iconset
+```
+### Code Signing and Notarization
+For distribution outside the App Store:
+```bash
+# Sign the app
+codesign --deep --force --verify --verbose \
+    --sign "Developer ID Application: Your Name" \
+    dist/VSCodeClipboardHelper.app
+# Create ZIP for notarization
+ditto -c -k --keepParent dist/VSCodeClipboardHelper.app VSCodeClipboardHelper.zip
+# Submit for notarization
+xcrun notarytool submit VSCodeClipboardHelper.zip \
+    --apple-id "your@email.com" \
+    --team-id YOUR_TEAM_ID \
+    --password "app-specific-password" \
+    --wait
+# Staple the ticket
+xcrun stapler staple dist/VSCodeClipboardHelper.app
+```
+## Resource Bundling
+PyInstaller bundles resources using `sys._MEIPASS`. The `get_resource_path()` function in `app/utils/resources.py` handles this automatically:
+| Running Mode | Resource Path |
+|-------------|---------------|
+| Source (`python main.py`) | Project root directory |
+| PyInstaller bundle | `sys._MEIPASS` temp directory |
+Bundled resources:
+- `icon.png` — Tray icon and window icon (all platforms)
+- `icon.ico` — Windows executable icon
+## Troubleshooting
+### Build fails with "ModuleNotFoundError"
+Ensure all dependencies are installed:
+```bash
+# Windows
+pip install -r requirements.txt -r requirements-windows.txt
+# macOS
+pip install -r requirements.txt -r requirements-macos.txt
+```
+### Windows Defender blocks the executable
+This is common with PyInstaller executables. Options:
+1. Sign the executable with a code signing certificate
+2. Add an exception in Windows Defender
+3. Build on the target machine
+### macOS: "App is damaged and can't be opened"
+This happens with unsigned apps. Clear the quarantine attribute:
+```bash
+xattr -cr dist/VSCodeClipboardHelper.app
+```
+### Build is very large
+Use `--onefile` for single-file distribution (Windows default) or `--onedir` for smaller initial download with faster startup (macOS default). The build script already chooses the best option per platform.
+### Missing icon after build
+Ensure `icon.png` exists in the project root. For platform-specific icons:
+- Windows: `icon.ico` in project root
+- macOS: `icon.icns` in project root (falls back to `icon.png`)
+---
+[← Usage Guide](usage.md) | [Back to README →](../README.md)
+
+// docs/code-standards.md
+# Code Standards
+## General Conventions
+| Aspect | Convention |
+|--------|-----------|
+| Language | Python 3.12+ |
+| Line length | 120 characters (soft limit) |
+| Naming: modules | `snake_case.py` |
+| Naming: classes | `PascalCase` |
+| Naming: functions/methods | `snake_case` |
+| Naming: constants | `UPPER_SNAKE_CASE` |
+| Naming: private members | `_leading_underscore` |
+| String quotes | Double quotes for docstrings, single quotes for string literals preferred |
+| Type hints | Required for all public methods (`from typing import ...`) |
+| Docstrings | Google-style for all public classes and methods |
+## Project Structure
+```
+app/
+├── core/           # Clipboard abstraction layer
+│   ├── clipboard_base.py      # ABC defining the interface
+│   ├── clipboard_windows.py   # Windows implementation
+│   └── clipboard_macos.py     # macOS implementation
+├── gui/            # UI components
+│   ├── main_window.py         # Tkinter app + clipboard polling
+│   └── tray_icon.py           # System tray wrapper
+└── utils/          # Shared utilities
+    ├── platform.py             # OS detection
+    ├── resources.py            # Resource path resolution
+    └── path_utils.py           # Path cleaning & parsing
+```
+## Import Ordering
+1. Standard library (`os`, `sys`, `logging`, `ctypes`, `tkinter`)
+2. Third-party (`pystray`, `PIL`, `win32clipboard`, `AppKit`)
+3. Local application (`from app.core import ...`, `from app.utils import ...`)
+Separate groups with blank lines.
+## Logging
+- Use `logging.getLogger(__name__)` in every module
+- Levels: `logger.debug()` for detailed tracing, `logger.info()` for key events, `logger.error()` for failures
+- Module-level `DEBUG` flag controls verbose output in clipboard handlers
+## Platform-Specific Code
+- Platform detection via `app.utils.platform.is_windows()` / `is_macos()`
+- Platform-specific imports are **inside methods** or in platform-specific modules only (e.g., `win32clipboard` only in `clipboard_windows.py`)
+- Conditional UI text: Vietnamese on Windows, English on macOS
+## Error Handling
+- Clipboard operations wrapped in `try/except` — clipboard access is inherently unreliable
+- `open_clipboard()` returns `bool` to signal success/failure
+- Always `close_clipboard()` in a `finally` block or after operations
+- Windows: close clipboard explicitly even on error in `set_clipboard_files()`
+## GUI Conventions
+- Tkinter for main window, pystray for system tray
+- Main-thread polling at 500ms interval (`POLL_INTERVAL_MS`)
+- Cross-thread communication via flags (`_pending_show_window`, `_pending_quit`) — not direct tkinter calls from pystray thread
+- Window close minimizes to tray (does not quit)
+## Build Conventions
+- PyInstaller for standalone executables
+- Windows: `--onefile --noconsole` with icon embedding
+- macOS: `--windowed --onedir` with app bundle structure
+- Resource files bundled via `--add-data`
+- `sys._MEIPASS` for finding resources when running from PyInstaller bundle
+
+// docs/codebase-summary.md
+# Codebase Summary
+## Overview
+VS Code Clipboard Helper (v2.0.0) is a Python desktop application that converts VS Code's clipboard file format to native OS file drop format. It uses a Tkinter GUI with system tray support and platform-specific clipboard handlers.
+**Total LOC:** ~1,400 (Python)
+## Module Map
+| Module | File | LOC | Purpose |
+|--------|------|-----|---------|
+| Entry | `main.py` | 36 | Application entry point |
+| Build | `build.py` | 120 | PyInstaller build script |
+| App | `app/__init__.py` | 10 | Package metadata |
+| Core | `app/core/__init__.py` | 22 | Factory: `get_clipboard_handler()` |
+| Core | `app/core/clipboard_base.py` | 157 | `ClipboardHandlerBase` ABC |
+| Core | `app/core/clipboard_windows.py` | 144 | `WindowsClipboardHandler` |
+| Core | `app/core/clipboard_macos.py` | 146 | `MacOSClipboardHandler` |
+| GUI | `app/gui/__init__.py` | 7 | Exports `VSCodeBridgeApp` |
+| GUI | `app/gui/main_window.py` | 337 | Main window, polling, tray integration |
+| GUI | `app/gui/tray_icon.py` | 185 | `TrayIcon` wrapper for pystray |
+| Utils | `app/utils/__init__.py` | 16 | Re-exports |
+| Utils | `app/utils/platform.py` | 49 | OS detection helpers |
+| Utils | `app/utils/resources.py` | 63 | PyInstaller-aware resource paths |
+| Utils | `app/utils/path_utils.py` | 108 | Path cleaning & file URI parsing |
+## Dependencies
+### Common (`requirements.txt`)
+| Package | Version | Purpose |
+|---------|---------|---------|
+| pystray | >=0.19.4 | System tray icon |
+| Pillow | >=10.0.0 | Icon image loading/resizing |
+| pyinstaller | >=6.0.0 | Build standalone executables |
+### Windows (`requirements-windows.txt`)
+| Package | Version | Purpose |
+|---------|---------|---------|
+| pywin32 | >=306 | Win32 clipboard API (`win32clipboard`, `win32con`) |
+### macOS (`requirements-macos.txt`)
+| Package | Version | Purpose |
+|---------|---------|---------|
+| pyobjc-framework-Cocoa | >=10.0 | macOS pasteboard API (`NSPasteboard`, `NSFilenamesPboardType`) |
+## Key Classes
+### ClipboardHandlerBase (`clipboard_base.py`)
+Abstract base class defining the clipboard interface:
+- `open_clipboard() -> bool` — Open clipboard for reading/writing
+- `close_clipboard() -> None` — Close clipboard
+- `has_file_drop() -> bool` — Check for native file drop format
+- `get_custom_format_data(format_name) -> Optional[str]` — Read custom clipboard format
+- `get_text_data() -> Optional[str]` — Read plain text from clipboard
+- `set_clipboard_files(file_list) -> bool` — Write native file drop format
+- `extract_file_paths_from_clipboard() -> Tuple[Optional[List[str]], Optional[str]]` — Main extraction method
+- `should_process_content(content_key) -> bool` — Deduplication check
+- `mark_as_converted(content_key) -> None` — Mark content as processed
+### WindowsClipboardHandler (`clipboard_windows.py`)
+Uses `win32clipboard` + `ctypes` for clipboard operations. Constructs `DROPFILES` struct for `CF_HDROP` format.
+### MacOSClipboardHandler (`clipboard_macos.py`)
+Uses `NSPasteboard` + `NSURL` via PyObjC. Writes file URLs with `writeObjects_()`.
+### VSCodeBridgeApp (`main_window.py`)
+Tkinter application with 500ms main-thread polling. Manages:
+- Status label and toggle button
+- System tray icon integration
+- Cross-thread communication (flag-based for GIL safety)
+- macOS dock visibility toggle
+- Clipboard monitoring lifecycle
+### TrayIcon (`tray_icon.py`)
+Pystray wrapper with platform-specific menus:
+- **Windows**: Vietnamese labels ("Hien giao dien", "Thoat")
+- **macOS**: English labels ("Show Window", "Quit")
+## Data Flow
+```
+VS Code (Ctrl+C/Cmd+C)
+  → Clipboard contains code/file-list format
+    → VSCodeBridgeApp polls clipboard (500ms, main thread)
+      → ClipboardHandlerBase.extract_file_paths_from_clipboard()
+        → Try formats: code/file-list → text/uri-list → vscode-editor-drop → atom-uri-list → plain text
+          → path_utils.text_to_files() parses and validates paths
+            → ClipboardHandlerBase.set_clipboard_files()
+              → Windows: DROPFILES struct via ctypes
+              → macOS: NSURL array via PyObjC
+```
+## Build Output
+| Platform | Output | Type |
+|----------|--------|------|
+| Windows | `dist/VSCodeClipboardHelper.exe` | Single executable (--onefile) |
+| macOS | `dist/VSCodeClipboardHelper.app` | App bundle (--onedir) |
+
+// docs/design-guidelines.md
+# Design Guidelines
+## UI Design Principles
+### Core Philosophy
+The VS Code Clipboard Helper follows a **utility-first** design approach:
+- Minimal visible UI — the app should disappear into the system tray
+- Status-at-a-glance — one color tells you everything (red = off, green = on)
+- Zero configuration needed for basic operation
+### Window Layout
+```
+┌──────────────────────────────────┐
+│    VS Code Clipboard Helper      │
+│                                  │
+│    ● Trạng thái: Đang chạy ngầm  │  ← Status label (red/green)
+│                                  │
+│    ┌──────────────────────────┐  │
+│    │      Bật Tool            │  │  ← Toggle button
+│    └──────────────────────────┘  │
+│                                  │
+│    Chọn file trong VS Code →     │  ← Instructions
+│    Ctrl+C → Paste vào nơi cần    │
+│                                  │
+│    ☐ Show in Dock  (macOS only)  │  ← Dock visibility checkbox
+│                                  │
+└──────────────────────────────────┘
+```
+- **Window size**: 320×180 pixels, non-resizable
+- **Layout**: Single column, centered content, 20px padding
+### Color Scheme
+| Element | Color | Usage |
+|---------|-------|-------|
+| Status: Stopped | Red | Monitoring is inactive |
+| Status: Running | Green | Monitoring is active |
+| Tray icon (default) | Blue | Default fallback icon |
+| Tray icon (loaded) | Custom | From `icon.png` / `icon.ico` |
+### Platform Differences
+| Aspect | Windows | macOS |
+|--------|---------|--------|
+| Status text | Vietnamese: "Trạng thái: Đang chạy ngầm" / "Trạng thái: Đang dừng" | English: "Status: Running" / "Status: Stopped" |
+| Button text | Vietnamese: "Bật Tool" / "Dừng Tool" | English: "Start Monitoring" / "Stop Monitoring" |
+| Instructions | Vietnamese: "Chọn file trong VS Code → Ctrl+C → Paste vào nơi cần" | English: "Copy files in VS Code (Cmd+C) → Paste into Finder or other apps" |
+| Tray menu | "Hiện giao diện" / "Thoát" | "Show Window" / "Quit" |
+| Dock visibility | N/A | Checkbox to toggle Dock icon |
+| Tray icon size | 32×32 | 22×22 |
+## System Tray Design
+### Icon States
+- **Default**: Blue square with white center (generated via PIL)
+- **Custom**: Loaded from `icon.png` (and `icon.ico` on Windows)
+- Resized automatically: 22×22 on macOS, 32×32 on Windows
+### Tray Menu Items
+**Windows:**
+1. Hiện giao diện (Show window)
+2. —separator—
+3. Thoát (Quit)
+**macOS:**
+1. Show Window
+2. —separator—
+3. Quit
+## Interaction Patterns
+### Startup Flow
+```
+App launches → Window shown → User clicks "Start Monitoring"
+→ Tray icon appears → Clipboard polling begins
+```
+### Window Close Behavior
+```
+User clicks X → Window hides (withdraw) → App continues in tray
+→ Tray menu "Show Window" → Window restores (deiconify)
+```
+### Clipboard Conversion Flow
+```
+User copies files in VS Code
+→ 500ms poll detects clipboard change
+→ Extract file paths from Electron format
+→ Validate paths exist on disk
+→ Write to clipboard in native format
+→ Mark content as converted (dedup)
+→ User pastes in Explorer/Finder → Files appear
+```
+### Quit Flow
+```
+Tray menu "Quit" → stop monitoring → stop tray → destroy window → sys.exit(0)
+```
+## Error Handling UX
+| Scenario | User Feedback |
+|----------|---------------|
+| Clipboard open fails | Silent (logged at debug level) |
+| Path validation fails | Silent (skipped, logged at debug level) |
+| Icon file missing | Fallback to generated blue icon |
+| Permission denied (macOS) | Check console for error messages |
+| Build missing deps | Warning printed to console |
+## Accessibility
+- High contrast status colors (red/green) with text labels — not color-only indicators
+- Keyboard-accessible toggle button (standard Tkinter widget)
+- System tray follows OS conventions for accessibility
+- Minimum touch/click target size: 30×30 pixels for buttons
+
+// docs/installation.md
+# Installation Guide
+This guide covers installing VS Code Clipboard Helper on Windows and macOS.
+## Prerequisites
+- **Python 3.12+** — [Download from python.org](https://www.python.org/downloads/)
+- **pip** — Usually included with Python
+- **Git** (optional) — For cloning the repository
+## Windows Installation
+### Step 1: Clone or Download
+```bash
+git clone https://github.com/Deocomate/vscode-clipboard-helper.git
+cd vscode-clipboard-helper
+```
+Or download and extract the ZIP from the [Releases](https://github.com/Deocomate/vscode-clipboard-helper/releases) page.
+### Step 2: Create Virtual Environment (Recommended)
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+### Step 3: Install Dependencies
+```bash
+pip install -r requirements.txt -r requirements-windows.txt
+```
+This installs:
+| Package | Purpose |
+|---------|---------|
+| pystray >=0.19.4 | System tray icon |
+| Pillow >=10.0.0 | Icon image handling |
+| pyinstaller >=6.0.0 | Building executables |
+| pywin32 >=306 | Windows clipboard API |
+### Step 4: Run
+```bash
+python main.py
+```
+## macOS Installation
+### Step 1: Clone or Download
+```bash
+git clone https://github.com/Deocomate/vscode-clipboard-helper.git
+cd vscode-clipboard-helper
+```
+### Step 2: Create Virtual Environment (Recommended)
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+### Step 3: Install Dependencies
+```bash
+pip install -r requirements.txt -r requirements-macos.txt
+```
+This installs:
+| Package | Purpose |
+|---------|---------|
+| pystray >=0.19.4 | System tray icon |
+| Pillow >=10.0.0 | Icon image handling |
+| pyinstaller >=6.0.0 | Building executables |
+| pyobjc-framework-Cocoa >=10.0 | macOS pasteboard API |
+> **Note:** PyObjC compiles native extensions during installation. This may take several minutes on first install.
+### Step 4: Run
+```bash
+python main.py
+```
+## Dependencies Overview
+| Package | Platform | Purpose |
+|---------|----------|---------|
+| pystray >=0.19.4 | All | System tray icon |
+| Pillow >=10.0.0 | All | Icon image loading/resizing |
+| pyinstaller >=6.0.0 | All | Building standalone executables |
+| pywin32 >=306 | Windows | Win32 clipboard API (`win32clipboard`, `win32con`) |
+| pyobjc-framework-Cocoa >=10.0 | macOS | macOS pasteboard (`NSPasteboard`, `NSFilenamesPboardType`) |
+## Troubleshooting
+### Windows: "pywin32" installation fails
+Try installing the pre-built wheel:
+```bash
+pip install pywin32 --no-cache-dir
+```
+If still failing, try:
+```bash
+python -m pip install pywin32 --no-cache-dir --force-reinstall
+```
+### macOS: "pyobjc" installation is slow
+PyObjC compiles native extensions, which takes time. This is normal. Expect 2-5 minutes on first install.
+### macOS: App crashes on startup
+Ensure you have Xcode Command Line Tools:
+```bash
+xcode-select --install
+```
+Also verify Python version:
+```bash
+python3 --version  # Must be 3.12+
+```
+### Windows: "No module named 'win32clipboard'"
+Make sure you installed the Windows-specific requirements:
+```bash
+pip install -r requirements-windows.txt
+```
+## Auto-Start on Boot
+### Windows
+1. Build the executable (see [Build Guide](build-guide.md))
+2. Press `Win+R`, type `shell:startup`, and press Enter
+3. Copy `VSCodeClipboardHelper.exe` to this folder
+### macOS
+1. Build the app bundle (see [Build Guide](build-guide.md))
+2. Open **System Preferences → Users & Groups → Login Items**
+3. Add `VSCodeClipboardHelper.app` to the list
+---
+[← Back to README](../README.md) | [Usage Guide →](usage.md)
+
+// docs/project-overview-pdr.md
+# Project Overview & Product Design Requirements
+## Product Summary
+**VS Code Clipboard Helper** is a cross-platform utility that bridges the clipboard format gap between VS Code and native file managers. When users copy files in VS Code's Explorer sidebar, the editor places data in `code/file-list` format — which most applications cannot read. This tool automatically converts that format to the native file drop format expected by Windows Explorer (`CF_HDROP`) or macOS Finder (`NSFilenamesPboardType`).
+## Problem Statement
+| Aspect | Detail |
+|--------|--------|
+| **Who** | Developers using VS Code who need to copy files to other applications |
+| **What** | VS Code uses `code/file-list` clipboard format, not the OS-native file drop format |
+| **Impact** | Users cannot paste copied files into Explorer, Finder, upload dialogs, or email attachments |
+| **Workaround** | Manually navigating to files in the file manager, or using the terminal |
+## Solution
+A lightweight background application that:
+1. Monitors the system clipboard for VS Code file copy events
+2. Extracts file paths from Electron-specific clipboard formats
+3. Writes them back in the OS-native file drop format
+4. Runs silently in the system tray with minimal resource usage
+## Key Features
+| Feature | Description |
+|---------|-------------|
+| Automatic conversion | Detects and converts clipboard data without user action |
+| Multi-format detection | Supports `code/file-list`, `text/uri-list`, `vscode-editor-drop`, `atom-uri-list`, plain `file://` URIs |
+| Cross-platform | Separate implementations for Windows (pywin32/ctypes) and macOS (PyObjC) |
+| System tray | Minimizes to tray; window close hides rather than quits |
+| Low resource usage | 500ms main-thread polling, ~20-50 MB memory |
+| Localized UI | Vietnamese interface on Windows, English on macOS |
+| Standalone build | PyInstaller packaging into .exe (Windows) or .app (macOS) |
+| Deduplication | Prevents re-processing the same clipboard content |
+## Non-Functional Requirements
+| Requirement | Target |
+|-------------|--------|
+| Startup time | < 3 seconds |
+| Memory usage | < 50 MB |
+| CPU usage when idle | < 1% |
+| Clipboard conversion latency | < 1 second from copy |
+| Binary size (Windows) | < 20 MB |
+| Supported Python | 3.12+ |
+| Supported OS | Windows 10+, macOS 12+ |
+## Technical Constraints
+- **Main-thread polling required** — PyObjC and tkinter both require main-thread access; background threads cause GIL conflicts on macOS
+- **No installable package** — Distributed as source or standalone binary, not on PyPI
+- **No network access** — Purely local clipboard operations
+- **No admin/root required** — Standard user permissions suffice
+## User Personas
+### Primary: Developer on Windows
+- Uses VS Code daily
+- Frequently copies files between VS Code and Explorer
+- Prefers Vietnamese or English UI
+- Wants a set-and-forget tool that starts with Windows
+### Secondary: Developer on macOS
+- Uses VS Code daily
+- Copies files to Finder, upload dialogs
+- Prefers menu bar-only apps (no Dock clutter)
+- Wants lightweight background operation
+## Success Metrics
+- Files paste correctly on first attempt after conversion
+- No noticeable system performance impact
+- App survives sleep/wake cycles and long uptime
+
+// docs/project-roadmap.md
+# Project Roadmap
+## Current Status: v2.0.0
+Fully functional clipboard format converter for Windows and macOS with system tray integration.
+### Completed Features
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Windows clipboard conversion | Done | CF_HDROP via DROPFILES struct |
+| macOS clipboard conversion | Done | NSFilenamesPboardType via PyObjC |
+| Multi-format detection | Done | code/file-list, text/uri-list, vscode-editor-drop, atom-uri-list, file:// URIs |
+| System tray icon | Done | pystray with platform-specific menus |
+| Tkinter GUI | Done | Status label, start/stop toggle |
+| PyInstaller build | Done | .exe (Windows), .app (macOS) |
+| Vietnamese UI (Windows) | Done | Localized status text and tray menu |
+| macOS dock visibility toggle | Done | NSApplicationActivationPolicy |
+| Content deduplication | Done | should_process_content/mark_as_converted |
+| Main-thread polling | Done | 500ms interval, avoids GIL issues |
+## Planned Enhancements
+### Short Term
+| Feature | Priority | Description |
+|---------|----------|-------------|
+| Linux support | Medium | Add clipboard handler for X11/Wayland (xclip, wl-copy) |
+| Auto-start on boot | Medium | Register with OS startup (Windows Task Scheduler, macOS Login Items) |
+| Config file | Medium | User preferences (polling interval, language, auto-start) |
+| Notification on conversion | Low | Brief toast notification when files are converted |
+### Medium Term
+| Feature | Priority | Description |
+|---------|----------|-------------|
+| File content preview | Low | Show converted file names in a small overlay |
+| Keyboard shortcut | Medium | Global hotkey to toggle monitoring |
+| Logging to file | Medium | Persistent logs for debugging |
+| Auto-update | Low | Check for new versions and notify |
+### Long Term
+| Feature | Priority | Description |
+|---------|----------|-------------|
+| Settings GUI | Low | Full preferences window |
+| Multiple language support | Low | i18n framework beyond Vietnamese/English |
+| Integration with other editors | Low | Support for JetBrains, Sublime Text clipboard formats |
+## Known Issues
+| Issue | Platform | Description |
+|-------|----------|-------------|
+| Double-copy needed sometimes | All | Timing issue when tool starts immediately after copying — first copy may not be detected |
+| macOS accessibility permissions | macOS | App may need accessibility permissions for tray icon |
+| Windows Defender false positive | Windows | PyInstaller executables commonly flagged; code signing recommended |
+| Tray icon overflow | Windows | May be in system tray overflow area; user must drag to main tray |
+## Version History
+| Version | Date | Changes |
+|---------|------|---------|
+| 2.0.0 | 2025 | Refactored project structure, cross-platform support, system tray |
+| 1.x | 2024 | Initial Windows-only implementation |
+
+// docs/system-architecture.md
+# System Architecture
+## High-Level Architecture
+```mermaid
+graph TD
+    VSCode[VS Code - Ctrl/Cmd+C] -->|code/file-list format| Clipboard[System Clipboard]
+    Clipboard -->|500ms poll| App[VSCodeBridgeApp]
+    App -->|extract_file_paths| Handler[ClipboardHandler]
+    Handler -->|parse paths| PathUtils[path_utils]
+    Handler -->|write native format| Clipboard
+    Clipboard -->|CF_HDROP / NSFilenamesPboardType| Explorer[Explorer / Finder / Apps]
+    App -->|show/hide| Tray[TrayIcon - pystray]
+    App -->|manage| Window[Tkinter Window]
+```
+## Module Dependency Graph
+```mermaid
+graph LR
+    main[main.py] --> gui[app.gui]
+    gui --> core[app.core]
+    gui --> utils[app.utils]
+    core --> utils
+    gui -->|VSCodeBridgeApp| MainWindow[main_window.py]
+    gui -->|TrayIcon| TrayIcon[tray_icon.py]
+    core -->|ClipboardHandlerBase| Base[clipboard_base.py]
+    core -->|WindowsClipboardHandler| Win[clipboard_windows.py]
+    core -->|MacOSClipboardHandler| Mac[clipboard_macos.py]
+    core -->|factory| Init[__init__.py]
+    utils -->|is_windows is_macos| Platform[platform.py]
+    utils -->|clean_path text_to_files| PathUtils[path_utils.py]
+    utils -->|get_resource_path| Resources[resources.py]
+```
+## Class Hierarchy
+```mermaid
+classDiagram
+    class ClipboardHandlerBase {
+        <<abstract>>
+        +last_clipboard_content: str
+        +open_clipboard() bool
+        +close_clipboard() None
+        +has_file_drop() bool
+        +get_custom_format_data(format_name) Optional~str~
+        +get_text_data() Optional~str~
+        +set_clipboard_files(file_list) bool
+        +extract_file_paths_from_clipboard() Tuple
+        +should_process_content(content_key) bool
+        +mark_as_converted(content_key) None
+        -_looks_like_path(text) bool
+    }
+    class WindowsClipboardHandler {
+        -_clipboard_open: bool
+        +open_clipboard() bool
+        +close_clipboard() None
+        +has_file_drop() bool
+        +get_custom_format_data(format_name) Optional~str~
+        +get_text_data() Optional~str~
+        +set_clipboard_files(file_list) bool
+        -_get_registered_format_id(format_name) int
+    }
+    class MacOSClipboardHandler {
+        -_pasteboard: NSPasteboard
+        +FILE_URL_TYPE: str
+        +FILE_NAMES_TYPE: NSFilenamesPboardType
+        +open_clipboard() bool
+        +close_clipboard() None
+        +has_file_drop() bool
+        +get_custom_format_data(format_name) Optional~str~
+        +get_text_data() Optional~str~
+        +set_clipboard_files(file_list) bool
+        +get_file_urls_from_pasteboard() Optional~List~str~~
+    }
+    ClipboardHandlerBase <|-- WindowsClipboardHandler
+    ClipboardHandlerBase <|-- MacOSClipboardHandler
+```
+## Clipboard Processing Flow
+```mermaid
+sequenceDiagram
+    participant App as VSCodeBridgeApp
+    participant Handler as ClipboardHandler
+    participant Utils as path_utils
+    participant Clipboard as System Clipboard
+    loop Every 500ms
+        App->>Handler: open_clipboard()
+        App->>Handler: extract_file_paths_from_clipboard()
+        Handler->>Handler: has_file_drop? → skip if native format exists
+        alt code/file-list format
+            Handler->>Clipboard: get_custom_format_data("code/file-list")
+            Handler->>Utils: text_to_files(data)
+            Utils-->>Handler: [file_paths]
+        else text/uri-list format
+            Handler->>Clipboard: get_custom_format_data("text/uri-list")
+            Handler->>Utils: text_to_files(data)
+            Utils-->>Handler: [file_paths]
+        else plain text fallback
+            Handler->>Clipboard: get_text_data()
+            Handler->>Utils: text_to_files(data)
+            Utils-->>Handler: [file_paths]
+        end
+        Handler-->>App: (file_list, source_format) or (None, None)
+        App->>Handler: close_clipboard()
+        alt file_list found
+            App->>App: should_process_content(files_key)?
+            App->>Handler: set_clipboard_files(file_list)
+            App->>App: mark_as_converted(files_key)
+        end
+    end
+```
+## Platform Implementation Details
+### Windows (`clipboard_windows.py`)
+- Uses `win32clipboard` module for clipboard operations
+- Constructs `DROPFILES` ctypes Structure for `CF_HDROP` format
+- `RegisterClipboardFormatW` for custom format detection
+- Unicode path support via `fWide = True` in `DROPFILES`
+- Multiple encoding fallback: UTF-8 → UTF-16 → Latin-1
+### macOS (`clipboard_macos.py`)
+- Uses `NSPasteboard` via PyObjC for pasteboard operations
+- `NSFilenamesPboardType` and `public.file-url` for native format
+- `NSURL.fileURLWithPath_()` for creating file URLs
+- `writeObjects_()` for writing file array to pasteboard
+- No explicit open/close needed (pasteboard is always accessible)
+## Threading Model
+```mermaid
+graph TD
+    MainThread[Main Thread - tkinter mainloop] -->|500ms poll| Poll[_poll_clipboard]
+    MainThread -->|after callbacks| Flags[_pending_show_window / _pending_quit]
+    subgraph Windows
+        TrayThread[Background Thread] -->|pystray Icon.run| TrayWin[TrayIcon]
+        TrayWin -->|set flags| Flags
+    end
+    subgraph macOS
+        MainThread -->|run_detached| TrayMac[TrayIcon]
+        TrayMac -->|set flags| Flags
+    end
+```
+- **Windows**: Tray icon runs in a background daemon thread; communicates with tkinter via flags
+- **macOS**: Tray icon uses `run_detached()`; flag polling via `root.after(100, _check_tray_flags)`
+- No direct tkinter calls from pystray thread (avoids GIL issues)
+
+// docs/usage.md
+# Usage Guide
+Learn how to use VS Code Clipboard Helper effectively.
+## Getting Started
+### Launching the Application
+**From source:**
+```bash
+python main.py
+```
+**From built executable:**
+- Windows: Double-click `VSCodeClipboardHelper.exe`
+- macOS: Double-click `VSCodeClipboardHelper.app`
+### Main Window
+When launched, you'll see a 320×180 window with:
+- **Status indicator** — Red (Stopped) or Green (Running) with text label
+- **Start/Stop button** — Toggle clipboard monitoring on/off
+- **Instructions** — Platform-specific usage reminder
+## Using the Tool
+### Basic Workflow
+1. **Start the app** and click the Start button
+2. **Copy files in VS Code:**
+   - Select files in the Explorer sidebar
+   - Press `Ctrl+C` (Windows) or `Cmd+C` (macOS)
+3. **Paste anywhere:**
+   - Windows Explorer
+   - macOS Finder
+   - File upload dialogs
+   - Email attachments
+   - Any application that accepts file drops
+### What Happens Behind the Scenes
+1. VS Code places file paths in the clipboard using `code/file-list` format
+2. The tool polls the clipboard every 500ms on the main thread
+3. When a supported format is detected, file paths are extracted and validated
+4. Paths are written to the clipboard in native file drop format
+5. Content is marked as converted to prevent re-processing
+6. Any application can now paste the files as if copied from the file manager
+## System Tray
+The app runs in the system tray for convenience.
+### Minimizing to Tray
+- Click the window's close button (X) — the app continues running in the background
+- Look for the icon in your system tray (Windows) or menu bar (macOS)
+### Tray Icon Menu
+Right-click the tray icon to see:
+**Windows:**
+| Menu Item | Action |
+|-----------|--------|
+| Hiện giao diện | Show the main window |
+| Thoát | Quit the application |
+**macOS:**
+| Menu Item | Action |
+|-----------|--------|
+| Show Window | Show the main window |
+| Quit | Quit the application |
+### macOS Dock Icon
+By default, the app runs as a **menu bar-only** application (no Dock icon). To toggle Dock visibility:
+1. Check/uncheck the **"Show in Dock"** checkbox in the main window
+2. When checked, the app icon appears in the Dock
+3. When unchecked, the app only appears in the menu bar
+> **Note:** Running without a Dock icon keeps your Dock clean while the app runs in the background.
+## Supported Clipboard Formats
+The tool detects multiple clipboard formats in priority order:
+| Priority | Format | Source |
+|----------|--------|--------|
+| 1 | `code/file-list` | VS Code (primary) |
+| 2 | `text/uri-list` | Electron apps |
+| 3 | `vscode-editor-drop` | VS Code drag-and-drop |
+| 4 | `atom-uri-list` | Atom editor |
+| 5 | Plain text with `file://` URIs | Various apps |
+If the clipboard already contains native file drop format (CF_HDROP on Windows, NSFilenamesPboardType on macOS), the tool skips conversion.
+## Path Processing
+The tool processes clipboard data through several steps:
+1. **Format detection** — Try each supported format in priority order
+2. **Path extraction** — Parse text into individual file paths (one per line)
+3. **Path cleaning** — Remove quotes, URL-decode (`%20` → space), strip `file://` prefix
+4. **Path normalization** — Convert separators to platform-native format (`\` on Windows, `/` on macOS)
+5. **Path validation** — Verify each path exists on disk
+6. **Native conversion** — Write validated paths in native clipboard format
+## Performance
+### CPU and Memory
+| Metric | Value |
+|--------|-------|
+| Polling interval | 500ms |
+| Typical memory | 20-50 MB |
+| CPU when idle | < 1% |
+| CPU when converting | Brief spike, < 100ms |
+Main consumers: Pillow (icon handling) and Tkinter (UI).
+### Tips
+- Only start monitoring when needed — the toggle button is always available
+- Stop monitoring when not actively copying files to save battery
+- The app uses main-thread polling to avoid GIL issues with PyObjC on macOS
+## Troubleshooting
+### Files not pasting
+1. Ensure monitoring is **ON** (status should be green)
+2. Copy the files again — the first copy after starting may not be detected
+3. Check that the source files exist at the copied paths
+4. Try copying twice — sometimes a timing issue means the first copy is detected but not converted
+### Tray icon not visible
+**Windows:** Check the system tray overflow area (click the arrow icon in the taskbar)
+**macOS:** The icon should appear in the menu bar. If not:
+- Ensure the app has accessibility permissions
+- Try restarting the app
+### Application crashes
+Run from terminal to see error messages:
+```bash
+python main.py
+```
+Common causes:
+- Missing dependencies (run `pip install -r requirements.txt -r requirements-<platform>.txt`)
+- Permission issues (especially on macOS with accessibility)
+- Corrupted or missing icon files
+### Double-copy needed
+Sometimes you need to copy twice:
+1. **First copy:** Tool detects and converts the format
+2. **Second copy:** Already in native format, pastes correctly
+This is a timing issue that occurs when the tool starts immediately after copying.
+## Keyboard Shortcuts
+| Action | Windows | macOS |
+|--------|---------|-------|
+| Copy files in VS Code | `Ctrl+C` | `Cmd+C` |
+| Paste files anywhere | `Ctrl+V` | `Cmd+V` |
+---
+[← Installation Guide](installation.md) | [Build Guide →](build-guide.md)
+
+// main.py
+"""
+VSCode Clipboard Helper - Entry Point
+A cross-platform utility that converts VS Code's file copy format
+to native file drop format for seamless paste operations.
+Supports Windows and macOS.
+"""
+import logging
+import sys
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(levelname)s] %(message)s'
+)
+def main():
+    """Main entry point for the application."""
+    from app.gui import VSCodeBridgeApp
+    from app.utils.platform import get_platform_name
+    logger = logging.getLogger(__name__)
+    logger.info(f"Starting VSCode Clipboard Helper on {get_platform_name()}")
+    try:
+        app = VSCodeBridgeApp()
+        app.run()
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+        sys.exit(1)
+if __name__ == "__main__":
+    main()
+
+// README.md
+# VS Code Clipboard Helper
+<div align="center">
+Seamlessly copy files from VS Code to Explorer/Finder
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-blue)](#installation)
+[![Python](https://img.shields.io/badge/Python-3.12+-green)](#requirements)
+[![Version](https://img.shields.io/badge/Version-2.0.0-brightgreen)](#)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](#license)
+</div>
+---
+## Problem
+When you copy files in VS Code's Explorer sidebar, it uses a custom clipboard format (`code/file-list`). Most applications expect the native file drop format:
+- **Windows**: `CF_HDROP`
+- **macOS**: `NSFilenamesPboardType`
+This means you can't paste files directly from VS Code to Windows Explorer, macOS Finder, or other applications.
+## Solution
+This lightweight utility runs in the background and automatically converts VS Code's clipboard format to the native format, enabling seamless file paste operations.
+## Features
+- **Automatic Conversion** - Silently converts `code/file-list` and other Electron formats to native file drop format
+- **Multi-Format Detection** - Supports `code/file-list`, `text/uri-list`, `vscode-editor-drop`, `atom-uri-list`, and plain `file://` URIs
+- **Cross-Platform** - Windows and macOS with platform-specific clipboard implementations
+- **System Tray** - Minimizes to tray to keep your taskbar/menubar clean
+- **Low Resource Usage** - 500ms polling on the main thread with minimal CPU impact (~20-50 MB memory)
+- **Localized UI** - Vietnamese interface on Windows, English on macOS
+- **Standalone Executable** - Build once, deploy anywhere (no Python required)
+## Installation
+### Quick Start (From Source)
+**Windows:**
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt -r requirements-windows.txt
+python main.py
+```
+**macOS:**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt -r requirements-macos.txt
+python main.py
+```
+> See [Installation Guide](docs/installation.md) for detailed instructions.
+### Pre-built Executables
+Download the latest release from the [Releases](https://github.com/Deocomate/vscode-clipboard-helper/releases) page.
+## Usage
+1. Launch the application
+2. Click **"Start Monitoring"** (or **"Bat Tool"** on Windows)
+3. Copy files in VS Code using `Ctrl+C` (Windows) or `Cmd+C` (macOS)
+4. Paste into Explorer, Finder, or any other application
+The app runs in the system tray. Close the window to minimize to tray. Right-click the tray icon to show the window or quit.
+> See [Usage Guide](docs/usage.md) for more details.
+## Building
+To build a standalone executable:
+```bash
+python build.py
+```
+This creates:
+- **Windows**: `dist/VSCodeClipboardHelper.exe` (single file)
+- **macOS**: `dist/VSCodeClipboardHelper.app` (app bundle)
+> See [Build Guide](docs/build-guide.md) for detailed instructions.
+## Project Structure
+```
+vscode-clipboard-helper/
+├── main.py                       # Entry point
+├── build.py                      # PyInstaller build script
+├── requirements.txt              # Common dependencies (pystray, Pillow, pyinstaller)
+├── requirements-windows.txt      # Windows deps (pywin32)
+├── requirements-macos.txt        # macOS deps (pyobjc-framework-Cocoa)
+├── app/
+│   ├── __init__.py               # Package metadata (v2.0.0)
+│   ├── core/
+│   │   ├── __init__.py           # Factory: get_clipboard_handler()
+│   │   ├── clipboard_base.py     # ClipboardHandlerBase ABC
+│   │   ├── clipboard_windows.py  # Windows handler (pywin32 + ctypes)
+│   │   └── clipboard_macos.py    # macOS handler (PyObjC)
+│   ├── gui/
+│   │   ├── __init__.py           # Exports VSCodeBridgeApp
+│   │   ├── main_window.py        # Main Tkinter window + clipboard polling
+│   │   └── tray_icon.py          # System tray (pystray + Pillow)
+│   └── utils/
+│       ├── __init__.py           # Re-exports utility functions
+│       ├── platform.py           # OS detection (Windows/macOS/Linux)
+│       ├── resources.py          # PyInstaller-aware resource paths
+│       └── path_utils.py         # Path cleaning & file:// URI parsing
+└── docs/
+    ├── installation.md
+    ├── build-guide.md
+    └── usage.md
+```
+## Requirements
+- **Python 3.12+**
+- **Common**: pystray, Pillow, pyinstaller
+- **Windows only**: pywin32
+- **macOS only**: pyobjc-framework-Cocoa
+## Supported Clipboard Formats
+| Format | Source |
+|--------|--------|
+| `code/file-list` | VS Code (primary) |
+| `text/uri-list` | Electron apps |
+| `vscode-editor-drop` | VS Code drag-and-drop |
+| `atom-uri-list` | Atom editor |
+| Plain text `file://` URIs | Various apps |
+## How It Works
+1. VS Code copies files using `code/file-list` clipboard format
+2. The tool polls the clipboard every 500ms on the main thread
+3. When a supported format is detected, it extracts file paths
+4. File paths are written to the clipboard in native format (CF_HDROP / NSFilenamesPboardType)
+5. Any application can now paste the files as if copied from the file manager
+## Contributing
+Contributions are welcome! Please feel free to submit a Pull Request.
+## License
+MIT License - see [LICENSE](LICENSE) for details.
+
+// requirements-macos.txt
+# macOS-specific dependencies
+# Install with: pip install -r requirements-macos.txt
+pyobjc-framework-Cocoa>=10.0
+
+// requirements-windows.txt
+# Windows-specific dependencies
+# Install with: pip install -r requirements-windows.txt
+pywin32>=306
+
+// requirements.txt
+# Common dependencies for all platforms
+pystray>=0.19.4
+Pillow>=10.0.0
+pyinstaller>=6.0.0
+

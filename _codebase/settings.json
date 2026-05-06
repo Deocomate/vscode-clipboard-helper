@@ -1,0 +1,48 @@
+{
+  "schema_version": 4,
+  "included_paths": [],
+  "excluded_paths": [
+    ".gitignore",
+    "build.py",
+    "icon.icns",
+    "icon.ico",
+    "icon.png"
+  ],
+  "priority_roots": [],
+  "global_ignore_patterns": [
+    ".git/",
+    "node_modules/",
+    "venv/",
+    "env/",
+    ".venv/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "dist/",
+    "build/",
+    "out/",
+    "target/",
+    "coverage/",
+    ".idea/",
+    ".vscode/",
+    "*.log",
+    "*.bak",
+    "*.swp",
+    "*.tmp",
+    ".DS_Store"
+  ],
+  "split_config": {
+    "enabled": true,
+    "split_count": 5,
+    "token_threshold": 40000
+  },
+  "ui": {
+    "selected_formats": [
+      "txt"
+    ],
+    "split_enabled": true,
+    "split_count": 5
+  },
+  "description": "Cấu hình gom mã nguồn dự án."
+}

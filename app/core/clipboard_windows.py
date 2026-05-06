@@ -142,3 +142,19 @@ class WindowsClipboardHandler(ClipboardHandlerBase):
             except Exception:
                 pass
             return False
+
+    def set_clipboard_text(self, text: str) -> bool:
+        """Write Unicode text to clipboard."""
+        try:
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            win32clipboard.CloseClipboard()
+            return True
+        except Exception as e:
+            logger.error(f"Error writing text to clipboard: {e}")
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+            return False
